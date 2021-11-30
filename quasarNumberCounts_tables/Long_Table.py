@@ -57,7 +57,8 @@ dz = 0.1
 zmin = 0.1
 zmax = np.min([7.0, (lam_eff[LSSTfilter]/(912.*u.AA)).to(1.).value])
 z  = np.arange(zmin, zmax+0.1*dz, dz)
-m  = np.arange(15.7, 26.3, 0.1)
+#m  = np.arange(15.7, 26.3, 0.1)
+m = np.arange(10.0, 28.0, 0.1)
 
 Ncpu = mp.cpu_count()-1
 m_index_use = np.arange(len(m)-1)
