@@ -5,6 +5,7 @@ import astropy.units as u
 from astropy.constants import c
 from astropy.cosmology import Planck13 as cosmo
 from astropy.table import Table
+import eazy.igm
 
 #This convoluted way of importing pysynphot is so that it does not generate a warning and take a long time to load. This happens because some tasks of pysynphot expect a number of files installed in the path 'PYSYN_CDBS' to work correctly. None of those tasks are being used in this script.
 import os
@@ -17,8 +18,8 @@ import pysynphot as S
 import sys
 sys.path.append("../QLFs/")
 
-
-def load_SED(sed):
+#Added redshift parameter, for different redshifts, IGM absorption is different
+def load_SED(sed,z):
 
     if sed=='Richards06':
         #Load the blue quasar spectrum from Richards et al. (2006).
@@ -36,8 +37,18 @@ def load_SED(sed):
         wave=qso_spec['Wave']
         flam=qso_spec['FluxD']*1e-17
 
+    #apply the IGM absorption from Inoue et al. (2014)to the SED
+    lam_res = wave
+    flam_res = flam
+    lam_obs = lam_res*(1+z)
+    flam_obs=flam_res/(1+z)
+    igm_model = eazy.igm.Inoue14()
+    igm_transmission = igm_model.full_IGM(z, lam_obs)
+    absorbed_flam = flam_obs * igm_transmission
+    absorbed_flam_res =  absorbed_flam*(1+z)
+
     #Load the pysynphot ArraySpectrum.
-    qso = S.ArraySpectrum(wave=wave, waveunits='angstrom', flux=flam,   fluxunits='flam')
+    qso = S.ArraySpectrum(wave=wave, waveunits='angstrom', flux=absorbed_flam_res, fluxunits='flam')
 
     return qso
 
@@ -71,9 +82,6 @@ exec("import {}".format(qlf_module))
 #Create the QLF object.
 exec("qlf = {0}.QLF(model=\"{1}\")".format(qlf_module, qlf_model))
 
-#Now, load the mean quasar SED.
-qso = load_SED(SED_model)
-
 # If Shen20, use the 1450A UV band as the calibration band. If Hopkins, use B-band instead, as they do not give the bolometric correction for 1450A.
 if qlf_module == "Shen20":
     #Create the UV band. Following the description in Table 1 of Shen et al. (2020), the filter is a box-shaped filter with a width of 100A centered at 1450A. Note that since we want the filter to cover the rest-frame 1450 angstrom flux density, we will need to redshift it with the spectrum.
@@ -100,14 +108,10 @@ filters = ['u', 'g', 'r', 'i', 'z', 'y']
 filtercurve = dict()
 for filter in filters:
     data = np.loadtxt("Filter_Curves/LSST_LSST.{}.dat".format(filter), skiprows=1)
-    filtercurve[filter] = S.ArrayBandpass(data[:,0], data[:,1], name="{}band".format(filter))
+    filtercurve[filter] = S.ArrayBandpass(data[:,0]*10, data[:,1], name="{}band".format(filter))
 
 #Calculate the m_cal - m_i color at z=0 so that we can easily transform M_cal to M_i later in the code. Note that M_i for an L* quasar is a needed quantity to replicate Table 10.2 of https://www.lsst.org/sites/default/files/docs/sciencebook/SB_10.pdf. See code Table10_2.py for further details.
-Cal_band = S.ArrayBandpass(lam_rest_cal.to(u.AA).value, R_cal, name=cal_band_name)
-obs_cal  = S.Observation(qso, Cal_band, binset=qso.wave)
-obs_i    = obs = S.Observation(qso, filtercurve['i'], binset=qso.wave)
-#We define color_cal_i = M_cal - M_i
-color_cal_i = obs_cal.effstim('abmag') - obs_i.effstim('abmag')
+Cal_band_res = S.ArrayBandpass(lam_rest_cal.to(u.AA).value, R_cal, name=cal_band_name)
 
 #Redshift grid.
 zmin = 0.01
@@ -119,11 +123,21 @@ zs = np.arange(zmin, zmax+0.1*dz, dz)
 mstar = np.zeros((len(zs),len(filters)))
 M_cal = np.zeros(len(zs))
 M_i = np.zeros(len(zs))
-for k,z in enumerate(zs):
 
+for k,z in enumerate(zs):
+    
+    #Now, load the mean quasar SED.
+    qso = load_SED(SED_model,z)
+    
+    #Calculate the m_cal - m_i color at z=0 so that we can easily transform M_cal to M_i later in the code. Note that M_i for an L* quasar is a needed quantity to replicate Table 10.2 of https://www.lsst.org/sites/default/files/docs/sciencebook/SB_10.pdf. See code Table10_2.py for further details.
+    obs_cal  = S.Observation(qso, Cal_band_res, binset=qso.wave)
+    obs_i    = S.Observation(qso, filtercurve['i'], binset=qso.wave)
+    #We define color_cal_i = M_cal - M_i
+    color_cal_i = obs_cal.effstim('abmag') - obs_i.effstim('abmag')
+    
     #Redshift the qso template to redshift z. Note that qso is an ArraySpectrum pysynphot object, so we use the pysynphot.ArraySpectrum.redshift() method to create a redshifted version of the spectrum.
     qso_z = qso.redshift(z)
-
+    
     #Setup the redshifted UV band as a pysynphot.ArrayBandpass object.
     Cal_band = S.ArrayBandpass(lam_rest_cal.to(u.AA).value*(1.+z), R_cal, name=cal_band_name)
 
@@ -166,6 +180,7 @@ for k,z in enumerate(zs):
 
     #Renormalize the redshifted qso spectrum to have a flux_density of fnu_1450 in the UV band. For this, we used the renorm method of the pysynphot.ArraySpectrum class.
     qso_z_renorm = qso_z.renorm(fnu_cal, 'fnu', Cal_band)
+    qso_z_renorm.convert('flam')
     #obs_1450 = S.Observation(qso_z_renorm, UV_band, binset=qso_z_renorm.wave)
 
     #Finally, convolve the redshifted quasar template with the LSST filter curves to obtain the observed magnitudes of the L* quasar.
@@ -198,7 +213,7 @@ for j,filter in enumerate(filters):
     cond = (~np.isnan(mstar[:,j]))
     plt.plot(zs[cond],mstar[cond,j],label='lsst'+filter)
 plt.legend()
-plt.ylim([13.,25.])
+plt.ylim([13., 35.])
 plt.xlabel('Redshift')
 plt.ylabel('Observed magnitude of L* quasar (AB)')
 plt.title('{0} SED, {1} QLF, {2} model'.format(SED_model, qlf_module, qlf_model))
